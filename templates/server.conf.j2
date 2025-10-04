@@ -1,0 +1,12 @@
+dev tap 
+ifconfig {{ip}} 255.255.255.0 
+topology subnet
+ca ca.crt
+cert server.crt
+key server.key
+tls-server
+dh dh.pem
+comp-lzo
+status /var/log/openvpn-status.log
+log /var/log/openvpn.log
+verb 3

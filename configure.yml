@@ -1,0 +1,231 @@
+---
+- name: Create vms on Proxmox
+  hosts: Homelab
+  vars_files:
+    - secrets.yml
+    - inventory/group_vars/hosts.yml 
+  become: true  
+
+  tasks:
+
+  - name: Install apt packages
+    ansible.builtin.apt:
+     state: present
+     pkg:
+     - openvpn
+     - iperf3
+     - git
+     update_cache: true
+
+  - name: Copy unit file
+    ansible.builtin.template:
+     backup: true
+     dest: /etc/systemd/system/openvpn@.service
+     group: root
+     mode: "0755"
+     owner: root
+     src: "templates/Unit_openvpn.j2"
+
+  - name: "Download easy-rsa from GitHub"
+    git:
+     repo: "https://github.com/OpenVPN/easy-rsa.git"
+     dest: "{{easyrsa_dest}}"
+     version: "{{easyrsa_version}}"
+    when: ansible_hostname == "server"
+
+  - name: "Configure easy-rsa"
+    template:
+     src: "templates/vars.j2"
+     dest: "{{easyrsa_dest}}/easyrsa3/vars"
+    when: ansible_hostname == "server"
+
+  - name: "Initialize pki"
+    command: ./easyrsa init-pki
+    args:
+     chdir: "{{easyrsa_dest}}/easyrsa3"
+     creates: "{{easyrsa_dest}}/easyrsa3/pki"
+    when: ansible_hostname == "server"
+
+  - name: "Build CA keys"
+    command: ./easyrsa build-ca nopass
+    args:
+     chdir: "{{easyrsa_dest}}/easyrsa3"
+     creates: "{{easyrsa_dest}}/easyrsa3/pki/private/ca.key"
+    when: ansible_hostname == "server"
+
+  - name: "Build the DH (Diffie-Hellman) key"
+    command: ./easyrsa gen-dh
+    args:
+     chdir: "{{easyrsa_dest}}/easyrsa3"
+     creates: "{{easyrsa_dest}}/easyrsa3/pki/dh.pem"
+    when: ansible_hostname == "server"
+
+  - name: "Generate the server certificate/key"
+    command: ./easyrsa --req-cn=server gen-req server nopass
+    args:
+     chdir: "{{easyrsa_dest}}/easyrsa3"
+     creates: "{{easyrsa_dest}}/easyrsa3/pki/private/server.key"
+    when: ansible_hostname == "server"
+   
+  - name: "Get the new CA to sign our server key"
+    command: ./easyrsa sign-req server server
+    args:
+     chdir: "{{easyrsa_dest}}/easyrsa3"
+     creates: "{{easyrsa_dest}}/easyrsa3/issued/server.crt"
+    when: ansible_hostname == "server"
+
+  - name: copy CA
+    ansible.builtin.copy:
+     src:  "{{easyrsa_dest}}/easyrsa3/pki/ca.crt"
+     dest:  /etc/openvpn/
+     remote_src: true
+    when: ansible_hostname == "server" 
+
+  - name: copy DH
+    ansible.builtin.copy:
+     src:  "{{easyrsa_dest}}/easyrsa3/pki/dh.pem"
+     dest:  /etc/openvpn/
+     remote_src: true
+    when: ansible_hostname == "server" 
+
+  - name: copy CA
+    ansible.builtin.copy:
+     src:  "{{easyrsa_dest}}/easyrsa3/pki/private/ca.key"
+     dest:  /etc/openvpn/
+     remote_src: true
+    when: ansible_hostname == "server"   
+
+  - name: copy key
+    ansible.builtin.copy:
+     src:  "{{easyrsa_dest}}/easyrsa3/pki/private/server.key"
+     dest:  /etc/openvpn/
+     remote_src: true
+    when: ansible_hostname == "server" 
+
+  - name: copy crt
+    ansible.builtin.copy:
+     src:  "{{easyrsa_dest}}/easyrsa3/pki/issued/server.crt"
+     dest:  /etc/openvpn/
+     remote_src: true
+    when: ansible_hostname == "server"   
+
+
+  - name: "Create the client keys"
+    command: ./easyrsa --req-cn={{item.name}} gen-req {{item.name}} nopass
+    args:
+     chdir: "{{easyrsa_dest}}/easyrsa3"
+     creates: "{{easyrsa_dest}}/easyrsa3/pki/private/{{item.name}}.key"
+    with_items: "{{ easyrsa_clients }}"
+    when: ansible_hostname == "server"
+
+  - name: "Get the certificate authority to sign the client request"
+    command: ./easyrsa sign-req client {{item.name}}
+    args:
+     chdir: "{{easyrsa_dest}}/easyrsa3"
+     creates: "{{easyrsa_dest}}/easyrsa3/issued/{{item.name}}.crt"
+    with_items: "{{ easyrsa_clients }}"
+    when: ansible_hostname == "server"
+    
+
+  #- name: Description
+  #  ansible.builtin.shell:
+  #    chdir: /etc/openvpn
+  #    cmd:  openvpn --genkey secret /etc/openvpn/static.key
+  #  when: ansible_hostname == "server"
+
+  - name: Ensure the directory exists on destination server
+    ansible.builtin.file:
+        path: /etc/openvpn/
+        state: directory
+    when: ansible_hostname == "client" 
+
+
+  - name: Download file from source server
+    fetch:
+        src: "{{easyrsa_dest}}/easyrsa3/pki/ca.crt"
+        dest: /tmp/ca.crt
+        flat: yes
+    when: ansible_hostname == "server"  
+
+  - name: Download file from source server
+    fetch:
+        src: "{{easyrsa_dest}}/easyrsa3/pki/private/client1.key"
+        dest: /tmp/client1.key
+        flat: yes
+    when: ansible_hostname == "server"
+
+  - name: Download file from source server
+    fetch:
+        src: "{{easyrsa_dest}}/easyrsa3/pki/issued/client1.crt"
+        dest: /tmp/client1.crt
+        flat: yes
+    when: ansible_hostname == "server"
+    
+  - name: Copy ca.crt to target server
+    copy:
+        src: /tmp/ca.crt
+        dest: /etc/openvpn/
+    when: ansible_hostname == "client"
+
+
+  - name: Copy key file to target server
+    copy:
+        src: /tmp/client1.key
+        dest: /etc/openvpn/
+    when: ansible_hostname == "client"
+
+
+  - name: Copy client crt file to target server
+    copy:
+        src: /tmp/client1.crt
+        dest: /etc/openvpn/
+    when: ansible_hostname == "client"      
+
+  - name: Copy config file server
+    ansible.builtin.template:
+     backup: true
+     dest: /etc/openvpn/server.conf
+     group: root
+     mode: "0755"
+     owner: root
+     src: "templates/server.conf.j2"
+    when: ansible_hostname == "server"
+
+
+  - name: Copy config file server
+    ansible.builtin.template:
+     backup: true
+     dest: /etc/openvpn/client.conf
+     group: root
+     mode: "0755"
+     owner: root
+     src: "templates/client.conf.j2"
+    when: ansible_hostname == "client"
+
+
+
+  - name: Start service
+    ansible.builtin.service:
+      enabled: true
+      name: openvpn@server
+      state: started
+    when: ansible_hostname == "server"
+
+  - name: Start service
+    ansible.builtin.service:
+      enabled: true
+      name: openvpn@client
+      state: started
+    when: ansible_hostname == "client"
+
+
+
+    
+
+
+
+
+
+
+
+
